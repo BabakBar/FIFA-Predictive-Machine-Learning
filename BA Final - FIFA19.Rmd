@@ -1,0 +1,1031 @@
+---
+title: "Fifa19 Machine Learning - Business Analytics"
+author: "Babak Barghi, Will Rains"
+date: "6/11/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(tidymodels)
+library(skimr)
+library(RColorBrewer)
+library(corrplot)
+library(kknn)
+```
+
+
+
+
+
+```{r}
+fifa_exam <- readRDS("fifa_exam.RDS")
+
+finalDS <- fifa_exam
+
+glimpse(finalDS)
+```
+
+#Calculate Ratings Overall
+
+##Based on https://fifauteam.com/player-ratings-guide-fifa-19/
+
+```{r}
+finalDS <- finalDS %>% 
+  mutate(Overall = case_when(
+    Position=="ST" | Position=="RS" | Position=="LS" ~ Finishing*.2+Positioning*.12+HeadingAccuracy*.10+ShotPower*.10+Reactions*.10+Dribbling*.08+BallControl*.08+Volleys*.05+LongShots*.05+Acceleration*.05+SprintSpeed*.04+Strength*.03,
+    Position=="RF" | Position=="CF" | Position=="LF" | Position =="RW" | Position =="LW" | Position=="RM" | Position=="LM" ~ Finishing*.12+Positioning*.12+Dribbling*.11+BallControl*.11+ShotPower*.10+LongShots*.10+Reactions*.10+ShortPassing*.06+HeadingAccuracy*.05+Vision*.05+Acceleration*.04+SprintSpeed*.04,
+    Position=="GK" ~ GKDiving*.24+GKHandling*.22+GKKicking*.04+GKPositioning*.22+GKReflexes*.22+Reactions*.06,
+    Position=="CB" |  Position=="RCB" |  Position=="LCB" ~ Marking*.15+StandingTackle*.15+SlidingTackle*.15+HeadingAccuracy*.10+Strength*.10+Aggression*.08+Interceptions*.08+ShortPassing*.05+BallControl*.05+Reactions*.05+Jumping*.04,
+    Position=="RB" | Position=="LB" | Position=="RWB" | Position=="LWB" ~ Marking*.10+StandingTackle*.12+SlidingTackle*.13+HeadingAccuracy*.07+Stamina*.08+Aggression*.05+Interceptions*.1+ShortPassing*.07+SprintSpeed*.05+BallControl*.08+Reactions*.05+Agility*.03,
+    Position=="CDM" | Position=="CM" | Position=="CAM" | Position=="RCM" | Position=="LCM" | Position=="LDM" | Position=="RDM" | Position=="LAM" | Position=="RAM"  ~ ShortPassing*.15+LongPassing*.13+Vision*.12+BallControl*.10+Dribbling*.09+Reactions*.08+Interceptions*.08+Positioning*.08+StandingTackle*.06+Stamina*.06+LongShots*.05
+    )
+  )
+
+```
+
+Add new variable for categorizing the Position into 4 parts as follow.
+
+```{r}
+finalDS <- finalDS %>% 
+  mutate(Position_new = case_when(
+    Position=="ST" | Position=="RS" | Position=="LS" | Position=="RF" | Position=="CF" | Position=="LF" ~ "Striker",
+    Position =="CDM" | Position =="CM" | Position=="CAM" | Position=="LCM" | Position =="LAM" | Position =="LW" | Position=="LM" | Position=="LDM"  | Position =="RCM" | Position=="RAM" | Position=="RW"  | Position=="RM" | Position=="RDM" ~ "Midfielder",
+    Position=="GK" ~ "Goalkeeper",
+    Position=="CB" |  Position=="RCB" |  Position=="LCB" | Position=="RB" | Position=="LB" | Position=="RWB" | Position=="LWB" ~ "Defender"
+    )
+  )
+```
+
+
+
+```{r}
+skim(finalDS)
+```
+
+
+```{r}
+finalDS %>% 
+  count(Position_new,
+        sort = TRUE)
+```
+
+4 levels of Positions, highest number of Positions are for Midfielders and Defenders. 
+
+
+Now, we evaluate the values.
+
+```{r}
+###Testing ranges to see where the zeroes start for value. Weighing a decision to filter out zeroes for the machine learning task
+
+finalDS %>% filter(Value==0) %>% summarise("Number of players with Zero Value"=n())
+
+finalDS %>% filter(Value==0) %>% filter(Overall<=79 & Overall>74) %>% select(Value,Overall,Age) %>% arrange(desc(Overall))
+
+finalDS %>% filter(Value==0) %>% filter(Overall<=79 & Overall>74) %>% select(Value,Overall,Age) %>% arrange(desc(Overall)) %>% summarise("Average Age" = mean(Age))
+
+finalDS %>% summarise("Average Age" = mean(Age))
+
+
+finalDS %>% filter(Value==0) %>% filter(Overall<=74 & Overall>69) %>% select(Value,Overall) %>% arrange(desc(Overall))
+finalDS %>% filter(Value==0) %>% filter(Overall<=69 & Overall>50) %>% select(Value,Overall) %>% arrange(desc(Overall))
+
+finalDS %>% filter(Overall<79 & Overall>74) %>% select(Value,Overall) %>% arrange(desc(Overall)) 
+
+finalDS %>% filter(Overall<79 & Overall>74) %>% select(Value,Overall) %>% arrange(desc(Overall)) %>%
+  summarise(mean(Value))
+
+finalDS %>% filter(Overall<69 & Overall>50) %>% select(Value,Overall) %>% arrange(desc(Overall)) %>%
+  summarise(mean(Value))
+```
+
+
+
+Note on the decision to remove in zero value rows:
+
+We have made the decision to *remove* some of the zero records for value. We found that there are 240 players with zero value and almost all of them fall under the under overall 74 rating. We added a Overall calculation that you can see above to help us understand skill level by position to remove the noise from having attributes that only pertain to certain positions. 
+We have identified the zero value players above a 60 overall rating as enough of an outlier to remove in this case as they are likely being moved at the time of the dataset or it is an incorrect entry or they have retired in which case it is not a true representative record to leave in the dataset as their value would be above zero if they were indeed on a club.
+
+
+
+
+
+```{r}
+#remove zero values (outliers)
+baseDS <- finalDS %>% filter(Value != 0)
+```
+
+
+```{r}
+fifa_model <- finalDS %>% filter(Value != 0) %>% select(-ID, -Position, -Overall, -Position_new)
+```
+
+
+Now we will make a few plots to get a sense of age x value and overall correlation between variables.
+
+```{r}
+#What age has the peak value? 
+
+
+baseDS %>% select(Age,Value) %>%
+  group_by(Age) %>%
+  summarise(AvgValue=mean(Value)) %>%
+  ggplot(aes(x=Age,y=AvgValue)) + 
+  geom_bar(stat="identity",aes(fill=Age)) +
+  theme_minimal() +
+  labs(y="Average  Value", title = "Average Value by Age")
+  
+
+```
+
+
+
+
+```{r, fig.height= 7, fig.width=9, warning=FALSE, message=FALSE}
+
+Fifa_data_numonly <- finalDS %>%
+  select_if(is_numeric) %>%
+  select(-ID)
+
+acorr <-cor(Fifa_data_numonly)
+corrplot(acorr, type="upper", na.label = "N",
+         col=brewer.pal(n=8, name="RdYlBu"))
+```
+
+From the corplot we see that Composure, Reaction & Overall have significant correlation with Value.
+
+PART 1 Classification and Predicting Position
+
+Now we will repeat this process for Classification and Predicting Position
+
+```{r cache=TRUE}
+
+#Set data set based on Classification
+fifa_class <- finalDS %>% select(-ID, -Overall, -Position)
+
+#We use initial_split to build train and test sets:
+set.seed(42)
+fifaSplit <- initial_split(fifa_class, prob = 0.8)
+
+fifaTrain <- training(fifaSplit)
+fifaTest <- testing(fifaSplit)
+
+
+fifaRecipe2 <- fifaTrain %>%
+  recipe(Position_new ~ .) %>%
+  step_mutate(Position_new = as.factor(Position_new)) %>%
+  step_center(all_numeric(),-all_outcomes()) %>%
+  step_scale(all_numeric(),-all_outcomes()) %>%
+  prep()
+
+fifaTrain_proc2 <- bake(fifaRecipe2, new_data = fifaTrain)
+fiftest_proc2 <- bake(fifaRecipe2, new_data = fifaTest)
+
+#-------KNN
+knn_spec2 <- nearest_neighbor() %>%
+  set_engine("kknn") %>%
+  set_mode("classification") 
+
+knn_fit2 <- knn_spec2 %>%
+  fit(Position_new ~ .,
+      data=fifaTrain_proc2)
+    
+knn_fit2
+#-------Tree
+tree_spec2 <- decision_tree() %>%
+  set_engine("rpart") %>%
+  set_mode("classification") %>%
+  translate()
+
+tree_fit2 <- tree_spec2 %>%
+  fit(Position_new ~ .,
+      data=fifaTrain_proc2)
+    
+tree_fit2  
+#------Random Forest
+
+
+rf_spec <- rand_forest() %>%
+  set_mode("classification") %>%
+  set_engine("ranger")
+
+##Code for abandoned hyperparameter tuning. Was taking too long default settings are ok
+# rf_spec <- rand_forest(
+#   mtry = tune(),
+#   trees = tune()
+#   
+# ) %>%
+#   set_mode("classification") %>%
+#   set_engine("ranger")
+# 
+# #get bootstrap samples to use for hyperparameter tuning
+# fifa_boot <- bootstraps(fifaTrain_proc2, times = 10) 
+# 
+# rf_wf <- workflow() %>%
+#   add_model(rf_spec) %>%
+#   add_formula(Position_new ~ .)
+# 
+# rf_grid <- tune_grid(
+#   rf_wf,
+#   resamples = fifa_boot
+# )
+# 
+# 
+# rf_grid
+
+
+rf_fit <- rf_spec %>%
+  fit(Position_new ~ .,
+      data=fifaTrain_proc2)
+
+rf_fit
+
+
+
+```
+
+we have assumed the default values for trees and mtry as the defaults settings for our purposes are sufficient.
+We have now created all of the models and fits and we will now compare the models via cross validation to choose the best one.
+
+
+
+```{r cache=TRUE}
+###Folds CV
+#######
+#test Tree - rpart
+
+
+set.seed(1234)
+validation_splits <- vfold_cv(fifaTrain,v=5)
+
+kn_wf2 <- workflow() %>%
+  add_recipe(fifaRecipe2) %>%
+  add_model(knn_spec2)
+
+knn_res2 <- fit_resamples(kn_wf2, 
+  validation_splits ,
+  control=control_resamples(save_pred = TRUE)
+)
+
+knn_res2 %>%
+  collect_metrics()
+
+# knn_res2 %>% unnest(.predictions)
+
+#######
+#test Tree - rpart
+tree_wf2 <- workflow() %>%
+  add_recipe(fifaRecipe2) %>%
+  add_model(tree_spec2)
+
+tree_res2 <- fit_resamples(tree_wf2, 
+                         validation_splits ,
+                         control=control_resamples(save_pred = TRUE)
+)
+
+tree_res2 %>%
+  collect_metrics()     
+
+#######
+#test rf - ranger
+
+rf_wf <- workflow() %>%
+  add_recipe(fifaRecipe2) %>%
+  add_model(rf_spec)
+
+rf_res <- fit_resamples(rf_wf, 
+                         validation_splits ,
+                         control=control_resamples(save_pred = TRUE)
+)
+
+rf_res %>%
+  collect_metrics()     
+
+# rf_res %>% unnest(.predictions)
+
+```
+
+In the above comparisons you can see that all three models performed quite well, but Random Forest is the clear winner with K nearest neighbor being right behind it. These algorithms are well able using their complex and multi-faceted nature adjust for this very segmented data in a way that a simple regression is not able to. We saw the same result in that of the value model setup where random forest also won. 
+
+Now we will perform a final fit on the RF model given that we have seen it is the best performing classification model in our cross validations and test on the train and test set.
+
+
+
+```{r}
+
+fifa_fit_RF_class <- last_fit(rf_wf, split = fifaSplit)
+
+# Show metrics on train set
+
+class_metrics <- metric_set(accuracy, sensitivity, specificity)
+
+
+
+# Obtain test set predictions data frame
+fifa_results_RF <- fifa_fit_RF_class %>% 
+                 collect_predictions()
+# View results
+head(fifa_results_RF)
+
+fifa_results_RF %>% 
+  class_metrics(truth = Position_new, estimate = .pred_class)
+
+```
+
+
+Now test against the test set to assess if we have overfitted.
+
+```{r}
+
+rf_wf <- workflow() %>%
+  add_recipe(fifaRecipe2) %>%
+  add_model(rf_spec) %>%
+  fit(fifaTrain)
+
+
+rf_fit %>%
+  predict(new_data = fiftest_proc2) %>%
+  mutate(truth=as.factor(fifaTest$Position_new)) %>%
+  class_metrics(truth, estimate = .pred_class)
+
+
+
+```
+
+
+These results in the test set is quite close, thus suggesting we have done a nice job on not overfitting to the train set. Otherwise if the testing performance metrics here were much worse then it would suggest that we did over fit and performance would be worse on new data.
+
+
+Now we will take a look at the confusion matrix for Train
+
+```{r}
+fifa_results_RF %>%
+  conf_mat(truth = Position_new, estimate = .pred_class)
+
+
+```
+
+
+Now we will take a look at the confusion matrix for Test
+
+```{r}
+rf_fit %>%
+  predict(new_data = fiftest_proc2) %>%
+  mutate(truth=as.factor(fifaTest$Position_new)) %>%
+  conf_mat(truth, estimate = .pred_class)
+
+
+```
+
+
+Now we will take a look at ROC curve
+
+
+```{r}
+rf_fifa_probs <- rf_fit %>%
+  predict(new_data = fiftest_proc2, type="prob") %>%
+  bind_cols(fiftest_proc2)
+
+rf_fifa_probs %>%
+  roc_curve(Position_new, .pred_Defender:.pred_Striker) %>%
+  autoplot()
+
+
+```
+
+
+
+We can see that based on our results in the ROC and the conf matrix and our modeling efforts we have created a reasonably well performing machine learning model that can predict a player's Position as defined by the new Positions that we changed in the dataset. This is valuable as the results are good and allow for people to use this model to predict with new data. 
+
+
+Another factor of model quality is judging that of sensitivity and specificity, if the values are under .5 then the model is worse than guessing if the values are over .5 then the model is better than guessing, as displayed in our ROC curves, the model for all position types approaches closely the corner with all important metrics above .9 indicating great model performance. The above ROC curves are plotted based off the test set performance thus this is showing that the model is not overfitted and would perform very well on new and real data
+
+
+
+
+PART 2
+
+* predicting player's market `Value`
+
+
+* Model 1
+
+# Linear Modeling with all the variables involved
+
+First model attempt with a simple regression model as this is the obvious choice for this type of dataset and numerical outcome. 
+
+## Data Preparation
+
+### Data splitting
+
+Before we build our model, we first split data into training and test set using *stratified sampling*.
+
+
+```{r}
+baseDS %>% 
+  ggplot(aes(Overall)) +
+  geom_histogram(bins = 80)
+```
+
+We want to ensure that the test set is representative of the various categories of Value in the whole dataset.
+
+```{r}
+
+
+set.seed(42)
+
+data_split <- initial_split(fifa_model, strata = Value, prop = 0.75)
+
+fifa_train <- training(data_split) 
+fifa_test <- testing(data_split)
+```
+
+
+### Recipes
+
+Next, we use **recipe** function to build a set of steps for data preprocessing and feature engineering.
+
+```{r}
+
+fifa_rec <- fifa_train %>%
+  recipe(Value ~ . ) %>%
+  step_normalize(all_predictors())
+
+# Show the result of our recipe
+fifa_rec 
+```
+
+Now we specify and then fit the models.
+
+## Building model
+
+
+```{r}
+fifa_lm <-                       # model specification
+  linear_reg() %>%               # model type
+  set_engine(engine = "lm") %>%  # model engine
+  set_mode("regression")         # model mode
+
+# model specification
+fifa_lm
+```
+
+
+
+To combine the data preparation with the model building, we use the **workflows**.
+
+## Create Workflow
+
+
+```{r}
+#define a workflow to train the model 
+
+fifa_wf <- workflow() %>%
+ add_model(fifa_lm) %>% 
+ add_recipe(fifa_rec)
+
+```
+
+
+## Evaluate Model
+
+We build a validation set with K-fold cross validation and perform k resamples:
+
+```{r}
+set.seed(12)
+
+fifa_folds <-
+ vfold_cv(fifa_train, 
+          strata = Value)
+
+fifa_folds
+```
+
+Now we can fit the model and collect the performance metrics with collect_metrics.
+
+```{r}
+fifa_resamples <- 
+  fifa_wf %>% 
+  fit_resamples(
+    Value ~ ., 
+    resamples = fifa_folds
+    ) 
+
+fifa_resamples %>% 
+    collect_metrics()
+```
+
+## Final Fit & Evaluation
+
+Fit the best model to the training set and evaluate the test set with the function **last_fit**:
+
+```{r}
+fifa_fit_lm <- last_fit(fifa_wf, split = data_split)
+
+# Show RMSE and RSQ
+fifa_fit_lm %>% 
+  collect_metrics()
+```
+
+We can save the test set predictions by using the **collect_predictions** function. This function returns a data frame which will have the response variables values from the test set and a column named *.pred* with the model predictions.
+
+```{r}
+# Obtain test set predictions data frame
+fifa_results_lm <- fifa_fit_lm %>% 
+                 collect_predictions()
+# View results
+head(fifa_results_lm)
+```
+
+
+## R2 Plot
+
+Finally, let’s use the fifa_results_lm dataframe to make an R2 plot to visualize our model performance on the test data set.
+
+```{r}
+fifa_results_lm %>%
+ggplot(mapping = aes(x = .pred, y = Value)) +
+  geom_point(color = '#006EA1', alpha = 0.25) +
+  geom_abline(intercept = 0, slope = 1, color = 'red') +
+  labs(title = 'Linear Regression Results',
+       x = 'Predicted Value',
+       y = 'Actual Value')
+```
+
+It is now observed that this type of modeling would be only beneficial regarding values under 20000. The reason is that the Values are not normally distributed, thus we can not consider this model very accurate. 
+
+
+
+# Model 2 & 3 
+
+KNN and Decision tree
+
+```{r cache=TRUE}
+#Now we will test other models as the above model showed very poor results
+#Create knn and decision tree spec
+
+# we already have train & test sets
+fifaRecipe <- fifa_train %>%
+  recipe(Value ~ .) %>%
+  step_center(all_numeric(),-all_outcomes()) %>%
+  step_scale(all_numeric(),-all_outcomes()) %>%
+  prep()
+
+fifa_train_proc <- bake(fifaRecipe, new_data = fifa_train)
+fiftest_proc <- bake(fifaRecipe, new_data = fifa_test)
+
+
+knn_spec <- nearest_neighbor() %>%
+  set_engine("kknn") %>%
+  set_mode("regression") 
+
+knn_fit <- knn_spec %>%
+  fit(Value ~ .,
+      data=fifa_train_proc)
+    
+knn_fit
+```
+
+
+```{r cache=TRUE}
+tree_spec <- decision_tree() %>%
+  set_engine("rpart") %>%
+  set_mode("regression") %>%
+  translate()
+
+tree_fit <- tree_spec %>%
+  fit(Value ~ .,
+      data=fifa_train)
+    
+    
+tree_fit
+```
+
+
+```{r, cache=TRUE, message=FALSE, warning=FALSE}
+#test Tree - rpart
+
+
+set.seed(1234)
+validation_splits <- vfold_cv(fifa_train,v=5)
+
+kn_wf <- workflow() %>%
+  add_recipe(fifaRecipe) %>%
+  add_model(knn_spec)
+
+knn_res <- fit_resamples(kn_wf, 
+  validation_splits ,
+  control=control_resamples(save_pred = TRUE)
+)
+
+knn_res %>%
+  collect_metrics()
+```
+
+
+```{r cache=TRUE}
+
+#test Tree - rpart
+tree_wf <- workflow() %>%
+  add_recipe(fifa_rec) %>%
+  add_model(tree_spec)
+
+tree_res <- fit_resamples(tree_wf, 
+                         fifa_folds ,
+                         control=control_resamples(save_pred = TRUE)
+)
+
+tree_res %>%
+  collect_metrics()                
+
+
+```
+
+```{r}
+
+tree_last_fit <- tree_wf %>% 
+    last_fit(data_split)
+
+tree_last_fit %>% collect_metrics()
+```
+
+
+The top result for predicting value appears to be the k nearest neighbor algorithm, thus we will create a full model based on that.
+
+```{r, warning=FALSE, message=FALSE}
+
+fifa_knn_wf <- workflow() %>%
+  add_recipe(fifaRecipe) %>%
+  add_model(knn_spec) %>%
+  fit(fifa_train)
+
+fifa_knn_wf 
+
+fifa_knn_wf_pred <- fifa_knn_wf %>%
+  predict(fifa_train) %>%
+  bind_cols(fifa_train)
+
+fifa_knn_wf_pred %>%
+  select(Value, .pred) %>%
+  glimpse() 
+```
+
+
+
+
+
+
+```{r}
+fifa_knn_wf_pred %>%
+  metrics(truth = Value, estimate = .pred)
+
+fifa_knn_wf %>%
+  predict(fifa_test) %>%
+  bind_cols(fifa_test) %>%
+  metrics(truth = Value, estimate = .pred)
+
+
+```
+
+
+```{r}
+knn_last_fit <- fifa_knn_wf %>% 
+    last_fit(data_split)
+
+knn_last_fit %>% collect_metrics()
+```
+
+
+Model 4
+
+# Random Forest
+
+We have already split our data into training, test, and cross validation sets as well as trained our feature engineering recipe, fifa_rec. These can be reused in our random forest workflow.
+
+
+## Model
+
+
+
+```{r}
+
+rf_model <- rand_forest() %>%
+  set_engine("ranger",
+             num.threads = parallel::detectCores(), 
+             importance = "permutation", 
+             verbose = TRUE) %>% 
+  set_mode("regression") %>% 
+  set_args(trees = 1000)
+
+
+rf_model
+```
+
+
+
+## Work flow
+
+Next, we combine our model and recipe into a workflow to easily manage the model-building process.
+
+```{r}
+rf_workflow <- workflow() %>% 
+               add_model(rf_model) %>% 
+               add_recipe(fifa_rec)
+```
+
+
+## Fit the model
+
+```{r, message=FALSE, warning=FALSE}
+set.seed(101)
+
+fit_rf <- fit_resamples(
+  rf_workflow,
+  fifa_folds,
+  metrics = metric_set(rmse, rsq),
+  control = control_resamples(verbose = TRUE,
+                              save_pred = TRUE,
+                              extract = function(x) x)
+)
+```
+
+
+
+```{r}
+rf_last_fit <- rf_workflow %>% 
+    last_fit(data_split)
+
+rf_last_fit %>% collect_metrics()
+```
+
+```{r}
+collect_predictions(rf_last_fit) %>%
+  ggplot(aes(Value, .pred)) +
+  geom_abline(lty = 2, color = "gray50") +
+  geom_point(alpha = 0.5, color = "midnightblue") +
+  coord_fixed()
+```
+
+
+
+
+
+
+
+```{r}
+collect_metrics(rf_last_fit) %>% 
+  bind_rows(collect_metrics(knn_last_fit)) %>%
+  bind_rows(collect_metrics(tree_last_fit)) %>% 
+  bind_rows(collect_metrics(fifa_fit_lm)) %>% 
+  filter(.metric == "rmse") %>% 
+  mutate(model = c("RF", "Knn", "DT","LM")) %>% 
+  select(model, everything())
+```
+
+
+
+After Modeling the dataset, in the next part we are going to have another approach regarding making models. We want to improve the accuracy of models by considering Overall variable. In the following parts, we carry on the same models but with different variables as follow.
+
+
+
+
+PART 3
+
+* predicting player's market `Value`
+
+
+* Model 1
+
+# KNN & Random Forest with only Overall, Composure, age, height & weight
+
+Since we already calculated Overall ratings for each player, in this part we build our models only based on that and the remaining variables. In other words, we only consider Overall, Age, Height, Weight and Composure to predict the target variable, *Value*.
+For this part we only implement models of KNN & Random Forest since they show better results comparing to other models.
+
+
+
+```{r}
+
+fifa_model2 <- baseDS %>% select(Age, Weight, Height, Composure, Overall, Value)
+
+set.seed(42)
+
+data_split2 <- initial_split(fifa_model2, strata = Value, prop = 0.75)
+
+fifa_train2 <- training(data_split2) 
+fifa_test2 <- testing(data_split2)
+
+fifa_rec2 <- fifa_train2 %>%
+  recipe(Value ~ . ) %>%
+  step_normalize(all_predictors())
+
+
+set.seed(12)
+
+fifa_folds2 <-
+ vfold_cv(fifa_train2, 
+          strata = Value)
+```
+
+
+
+KNN 
+
+```{r cache=TRUE}
+#Now we will test other models as the above model showed very poor results
+#Create knn and decision tree spec
+
+# we already have train & test sets
+fifaRecipe2 <- fifa_train2 %>%
+  recipe(Value ~ .) %>%
+  step_center(all_numeric(),-all_outcomes()) %>%
+  step_scale(all_numeric(),-all_outcomes()) %>%
+  prep()
+
+fifa_train_proc2 <- bake(fifaRecipe2, new_data = fifa_train2)
+fiftest_proc2 <- bake(fifaRecipe2, new_data = fifa_test2)
+
+
+knn_spec2 <- nearest_neighbor() %>%
+  set_engine("kknn") %>%
+  set_mode("regression") 
+
+knn_fit2 <- knn_spec2 %>%
+  fit(Value ~ .,
+      data=fifa_train_proc2)
+    
+knn_fit2
+```
+
+
+```{r}
+
+fifa_knn_wf2 <- workflow() %>%
+  add_recipe(fifaRecipe2) %>%
+  add_model(knn_spec2) %>%
+  fit(fifa_train2)
+
+fifa_knn_wf2 
+
+fifa_knn_wf_pred2 <- fifa_knn_wf2 %>%
+  predict(fifa_train2) %>%
+  bind_cols(fifa_train2)
+
+fifa_knn_wf_pred2 %>%
+  select(Value, .pred) %>%
+  glimpse() 
+```
+
+
+
+
+
+
+```{r}
+fifa_knn_wf_pred2 %>%
+  metrics(truth = Value, estimate = .pred)
+
+fifa_knn_wf2 %>%
+  predict(fifa_test2) %>%
+  bind_cols(fifa_test2) %>%
+  metrics(truth = Value, estimate = .pred)
+
+
+```
+
+
+```{r}
+knn_last_fit2 <- fifa_knn_wf2 %>% 
+    last_fit(data_split2)
+
+knn_last_fit2 %>% collect_metrics()
+```
+
+
+
+# Random Forest
+
+
+
+```{r}
+
+rf_model2 <- rand_forest() %>%
+  set_engine("ranger",
+             num.threads = parallel::detectCores(), 
+             importance = "permutation", 
+             verbose = TRUE) %>% 
+  set_mode("regression") %>% 
+  set_args(trees = 1000)
+
+```
+
+
+
+```{r}
+rf_workflow2 <- workflow() %>% 
+               add_model(rf_model2) %>% 
+               add_recipe(fifa_rec2)
+```
+
+
+## Fit the model
+
+```{r, message=FALSE, warning=FALSE}
+set.seed(101)
+
+fit_rf2 <- fit_resamples(
+  rf_workflow2,
+  fifa_folds2,
+  metrics = metric_set(rmse, rsq),
+  control = control_resamples(verbose = TRUE,
+                              save_pred = TRUE,
+                              extract = function(x) x)
+)
+```
+
+
+
+```{r}
+rf_last_fit2 <- rf_workflow2 %>% 
+    last_fit(data_split2)
+
+rf_last_fit2 %>% collect_metrics()
+```
+
+```{r}
+collect_predictions(rf_last_fit2) %>%
+  ggplot(aes(Value, .pred)) +
+  geom_abline(lty = 2, color = "gray50") +
+  geom_point(alpha = 0.5, color = "midnightblue") +
+  coord_fixed()
+```
+
+
+
+
+# Final comparing of Models
+
+
+
+```{r}
+collect_metrics(rf_last_fit2) %>% 
+  bind_rows(collect_metrics(knn_last_fit2)) %>%
+  bind_rows(collect_metrics(rf_last_fit)) %>% 
+  bind_rows(collect_metrics(knn_last_fit)) %>%
+  bind_rows(collect_metrics(tree_last_fit)) %>% 
+  bind_rows(collect_metrics(fifa_fit_lm)) %>% 
+  filter(.metric == "rmse") %>% 
+  mutate(model = c("RF2", "Knn2","RF", "Knn", "DT","LM")) %>% 
+  select(model, everything())
+```
+Random Forest from first modeling which considered more variables show better outcome. 
+Considering the above results, we are choosing first *Random Forest* from first part in order to perform our predictions.  
+
+
+```{r}
+fifa_rf_wf <- workflow() %>%
+  add_recipe(fifa_rec) %>%
+  add_model(rf_model) %>%
+  fit(fifa_train)
+
+fifa_rf_wf_pred <- fifa_rf_wf %>%
+  predict(fifa_train) %>%
+  bind_cols(fifa_train)
+
+fifa_rf_wf_pred %>%
+  select(Value, .pred) %>%
+  head(n=10)
+```
+
+
+
+
+
+```{r}
+fifa_rf_wf_pred %>%
+  metrics(truth = Value, estimate = .pred)
+```
+
+
+```{r}
+
+
+fifa_rf_wf_test <- fifa_rf_wf %>%
+  predict(fifa_test) %>%
+  bind_cols(fifa_test)
+
+fifa_rf_wf_test %>%
+  select(Value, .pred) %>%
+  head(n=10)
+```
+
+
+```{r}
+
+fifa_rf_wf_test %>%
+  metrics(truth = Value, estimate = .pred)
+```
+
+# Conclusion 
+
+As we see the metrics in the train set of random forest, high value *rsq* which is 0.98 indicates overfitting for our model. However, after predicting the test set we observe that rsq is still high with 0.91 and rmse with 1704. This numbers show decent result considering the huge values involed in this case.
